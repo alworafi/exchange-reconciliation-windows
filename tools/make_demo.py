@@ -46,6 +46,10 @@ def write(path, title, rows):
 
 if __name__ == "__main__":
     import sys
+    try:  # نافذة أوامر Windows قد لا تدعم العربية بترميزها الافتراضي
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     if len(sys.argv) > 1:
         OUT = Path(sys.argv[1])
     OUT.mkdir(parents=True, exist_ok=True)
