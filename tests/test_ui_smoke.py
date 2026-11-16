@@ -16,7 +16,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def test_all_pages_open_with_demo_data(env, tmp_path):
     import subprocess, sys
-    subprocess.run([sys.executable, str(ROOT / "tools" / "make_demo.py")], check=True, capture_output=True)
+    demo = tmp_path / "demo"
+    subprocess.run([sys.executable, str(ROOT / "tools" / "make_demo.py"), str(demo)], check=True,
+                   capture_output=True)
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
@@ -25,8 +27,8 @@ def test_all_pages_open_with_demo_data(env, tmp_path):
 
     conn = env["conn"]
     acc = services.create_account(conn, "صراف تجريبي")
-    do_import(env, acc, "system", ROOT / "demo" / "كشف_النظام_تجريبي.xlsx")
-    do_import(env, acc, "exchanger", ROOT / "demo" / "كشف_الصراف_تجريبي.xlsx")
+    do_import(env, acc, "system", demo / "كشف_النظام_تجريبي.xlsx")
+    do_import(env, acc, "exchanger", demo / "كشف_الصراف_تجريبي.xlsx")
     services.run_matching(conn, acc)
 
     app = QApplication.instance() or QApplication([])

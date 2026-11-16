@@ -45,7 +45,10 @@ def write(path, title, rows):
 
 
 if __name__ == "__main__":
-    OUT.mkdir(exist_ok=True)
+    import sys
+    if len(sys.argv) > 1:
+        OUT = Path(sys.argv[1])
+    OUT.mkdir(parents=True, exist_ok=True)
     write(OUT / "كشف_النظام_تجريبي.xlsx", "كشف حساب الصراف في النظام (تجريبي)", SYSTEM)
     write(OUT / "كشف_الصراف_تجريبي.xlsx", "كشف حسابكم لدينا (تجريبي)", EXCHANGER)
     print("تم إنشاء الملفات في", OUT)
