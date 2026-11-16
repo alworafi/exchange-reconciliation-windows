@@ -114,8 +114,8 @@ def test_partial_payment_keeps_remainder_open(env):
     e2 = write_statement(env["dir"] / "e2.xlsx", [(D(2026, 10, 9), "P1", "حوالة سالم باقي", None, 400)])
     do_import(env, acc, "exchanger", e2)
     services.run_matching(conn, acc)
-    p2 = _matches(conn, acc, "proposed")[0]
-    services.approve_match(conn, p2["id"])
+    # المتبقي 400 بنفس المرجع والمبلغ => دليل قوي، يُعتمد تلقائيًا
+    assert _matches(conn, acc, "proposed") == []
     sid = _txn_id(conn, "system", "P1")
     assert services.approved_alloc(conn, acc)[sid] == 100000   # 1000.00 بالكامل
     assert rc.compute(conn, acc, "YER", D(2026, 10, 1), D(2026, 10, 31)).open_items == []
@@ -129,10 +129,11 @@ def test_different_dates_within_window_and_beyond(env):
           (D(2026, 10, 1), "LONG1", "حوالة متأخرة", 555, None)],
          [(D(2026, 10, 8), None, "حوالة فهد", None, 1234), (D(2026, 12, 25), None, "حوالة", None, 999),
           (D(2026, 12, 20), "LONG1", "حوالة", None, 555)])
+    conn.execute("UPDATE transactions SET txn_date='2027-03-15' WHERE side='exchanger' AND amount=99900")
     services.run_matching(conn, acc)
     props = _matches(conn, acc, "proposed")
     amounts = sorted(p["matched_amount"] for p in props)
-    # 1234 داخل نافذة التاريخ، 555 خارجها لكن المرجع متطابق، 999 خارجها بلا مرجع => لا تُقترح
+    # 1234 داخل نافذة التاريخ، 555 خارجها لكن المرجع متطابق، 999 بعد 165 يومًا بلا مرجع => لا تُقترح
     assert amounts == [55500, 123400]
 
 

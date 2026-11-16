@@ -14,9 +14,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
+from .db import DIFF_REASONS
 from .money import ZERO, from_minor
 from .services import eff_dir
 
@@ -55,6 +56,12 @@ class OpenItem:
     in_period: bool
     is_retroactive: bool
     age_days: int
+    reason: str | None = None       # سبب الفرق (خصم، عمولة، ...) إن حدده المستخدم
+    reason_note: str = ""
+
+    @property
+    def reason_label(self) -> str:
+        return DIFF_REASONS.get(self.reason, "غير معلَّل") if self.reason else "غير معلَّل"
 
     @property
     def signed(self) -> Decimal:
@@ -80,6 +87,39 @@ class CurrencyRecon:
     exchanger: SideBalance
     open_items: list[OpenItem] = field(default_factory=list)
     balance_checks: list[dict] = field(default_factory=list)
+    opening_open_items: list[OpenItem] = field(default_factory=list)   # المفتوح في بداية الفترة
+
+    @staticmethod
+    def _net(items) -> Decimal:
+        s = sum((i.signed for i in items if i.side == "system"), ZERO)
+        e = sum((i.signed for i in items if i.side == "exchanger"), ZERO)
+        return s - e
+
+    @property
+    def opening_explained(self) -> Decimal:
+        """الجزء من فرق الافتتاحي الذي تفسره حركات كانت مفتوحة في بداية الفترة."""
+        return self._net(self.opening_open_items)
+
+    @property
+    def opening_unexplained(self) -> Decimal:
+        return self.opening_diff - self.opening_explained
+
+    def settled_during_period(self) -> list[OpenItem]:
+        """حركات كانت مفتوحة في بداية الفترة وطوبقت (كليًا أو جزئيًا) خلالها."""
+        end = {(i.side, i.txn_id): i.open for i in self.open_items}
+        out = []
+        for i in self.opening_open_items:
+            if end.get((i.side, i.txn_id), ZERO) < i.open:
+                out.append(i)
+        return out
+
+    def reason_totals(self) -> dict[str, Decimal]:
+        """الفروقات المفتوحة حسب السبب (أثرها على الفرق: النظام − الصراف)."""
+        out: dict[str, Decimal] = {}
+        for i in self.open_items:
+            v = i.signed if i.side == "system" else -i.signed
+            out[i.reason_label] = out.get(i.reason_label, ZERO) + v
+        return out
 
     @property
     def opening_diff(self) -> Decimal:
@@ -154,24 +194,13 @@ def compute(conn, account_id: int, currency: str, date_from: date | str, date_to
         "SELECT * FROM transactions WHERE account_id=? AND currency=? AND status='active' AND txn_date<=?"
         " ORDER BY txn_date, id", (account_id, currency, dt)).fetchall()
 
-    # المطابقات المعتمدة التي كل حركاتها ضمن تاريخ نهاية الفترة فقط تُحتسب في ذلك التاريخ
-    alloc: dict[int, int] = {}
-    for m in conn.execute(
-            "SELECT id FROM matches WHERE account_id=? AND currency=? AND status='approved'", (account_id, currency)):
-        items = conn.execute(
-            "SELECT mi.txn_id, mi.amount, t.txn_date FROM match_items mi JOIN transactions t ON t.id=mi.txn_id"
-            " WHERE mi.match_id=?", (m["id"],)).fetchall()
-        if all(i["txn_date"] <= dt for i in items):
-            for i in items:
-                alloc[i["txn_id"]] = alloc.get(i["txn_id"], 0) + i["amount"]
-
     sides = {}
-    open_items: list[OpenItem] = []
-    end = date.fromisoformat(dt)
+    bases = {}
     for side in ("system", "exchanger"):
         sb = SideBalance()
         base = _base(conn, account_id, side, currency)
         base_date = base["as_of"] if base else None
+        bases[side] = base_date
         own_base = from_minor(base["balance"]) if base else ZERO
         sb.base_as_of = base_date
         sb.base_balance = conv[side] * own_base
@@ -182,25 +211,12 @@ def compute(conn, account_id: int, currency: str, date_from: date | str, date_to
                 sb.excluded_before_base += 1
                 continue
             amt = from_minor(t["amount"])
-            signed_own = amt if t["direction"] == "D" else -amt
             if t["txn_date"] < df:
-                own_open += signed_own
+                own_open += amt if t["direction"] == "D" else -amt
+            elif t["direction"] == "D":
+                own_mov_d += amt
             else:
-                if t["direction"] == "D":
-                    own_mov_d += amt
-                else:
-                    own_mov_c += amt
-            matched = from_minor(alloc.get(t["id"], 0))
-            remaining = amt - matched
-            if remaining > 0:
-                cat = f"{side}_only" if matched == 0 else f"{side}_partial"
-                open_items.append(OpenItem(
-                    txn_id=t["id"], side=side, date=t["txn_date"], description=t["description"] or "",
-                    reference=t["reference"] or "", counterparty=t["counterparty"] or "",
-                    direction=t["direction"], eff_dir=eff_dir(side, t["direction"], mirror), amount=amt,
-                    matched=matched, open=remaining, category=cat, in_period=t["txn_date"] >= df,
-                    is_retroactive=bool(t["is_retroactive"]),
-                    age_days=(end - date.fromisoformat(t["txn_date"])).days))
+                own_mov_c += amt
         sb.own_opening = own_open
         sb.own_closing = own_open + own_mov_d - own_mov_c
         sb.opening = conv[side] * sb.own_opening
@@ -211,9 +227,47 @@ def compute(conn, account_id: int, currency: str, date_from: date | str, date_to
             sb.period_debit, sb.period_credit = own_mov_c, own_mov_d
         sides[side] = sb
 
+    open_items = _open_items(conn, account_id, currency, txns, bases, mirror, dt, df)
+    start_day = (date.fromisoformat(df) - timedelta(days=1)).isoformat()
+    opening_items = _open_items(conn, account_id, currency, [t for t in txns if t["txn_date"] < df], bases,
+                                mirror, start_day, df)
+
     rec = CurrencyRecon(account_id, acc["name"], currency, df, dt, sides["system"], sides["exchanger"], open_items)
+    rec.opening_open_items = opening_items
     rec.balance_checks = balance_checks(conn, account_id, currency, mirror)
     return rec
+
+
+def _open_items(conn, account_id, currency, txns, bases, mirror, as_of: str, df: str) -> list[OpenItem]:
+    """الحركات المفتوحة كما في تاريخ as_of: لا تُحتسب إلا المطابقات التي كل حركاتها في as_of أو قبله."""
+    alloc: dict[int, int] = {}
+    for m in conn.execute(
+            "SELECT id FROM matches WHERE account_id=? AND currency=? AND status='approved'", (account_id, currency)):
+        items = conn.execute(
+            "SELECT mi.txn_id, mi.amount, t.txn_date FROM match_items mi JOIN transactions t ON t.id=mi.txn_id"
+            " WHERE mi.match_id=?", (m["id"],)).fetchall()
+        if all(i["txn_date"] <= as_of for i in items):
+            for i in items:
+                alloc[i["txn_id"]] = alloc.get(i["txn_id"], 0) + i["amount"]
+    end = date.fromisoformat(as_of)
+    out = []
+    for t in txns:
+        side = t["side"]
+        if t["txn_date"] > as_of or (bases[side] and t["txn_date"] < bases[side]):
+            continue
+        amt = from_minor(t["amount"])
+        matched = from_minor(alloc.get(t["id"], 0))
+        remaining = amt - matched
+        if remaining <= 0:
+            continue
+        out.append(OpenItem(
+            txn_id=t["id"], side=side, date=t["txn_date"], description=t["description"] or "",
+            reference=t["reference"] or "", counterparty=t["counterparty"] or "", direction=t["direction"],
+            eff_dir=eff_dir(side, t["direction"], mirror), amount=amt, matched=matched, open=remaining,
+            category=f"{side}_only" if matched == 0 else f"{side}_partial", in_period=t["txn_date"] >= df,
+            is_retroactive=bool(t["is_retroactive"]), age_days=(end - date.fromisoformat(t["txn_date"])).days,
+            reason=t["diff_reason"], reason_note=t["diff_note"] or ""))
+    return out
 
 
 def balance_checks(conn, account_id: int, currency: str, mirror: bool) -> list[dict]:

@@ -56,7 +56,8 @@ def make_signature(allocations) -> str:
 
 @dataclass
 class EngineConfig:
-    date_window: int = 15
+    date_window: int = 30
+    max_lookback: int = 120          # عمليات قديمة: مسموح فقط إذا كان المبلغ وحيدًا في الجانبين
     min_score: int = 45
     auto_approve: bool = True
     auto_min_score: int = 85
@@ -111,16 +112,22 @@ def text_score(a: Item, b: Item) -> tuple[int, str | None]:
     return 0, None
 
 
-def score_pair(a: Item, b: Item, cfg: EngineConfig, exact_amount: bool = True) -> tuple[int, list[str]] | None:
+def score_pair(a: Item, b: Item, cfg: EngineConfig, exact_amount: bool = True,
+               unique_amount: bool = False) -> tuple[int, list[str]] | None:
     """يرجع (الدرجة، الأسباب) أو None إذا كان الزوج غير مقبول."""
     if a.eff_dir != b.eff_dir:
         return None
     days = abs((a.date - b.date).days)
     rpts, rmsg = ref_relation(a, b)
     if days > cfg.date_window and rpts < 20:
-        return None
+        # عملية قديمة (حوالة اليوم مقابل فاتورة قبل شهر): نقبلها فقط إذا كان المبلغ وحيدًا في الجانبين
+        if not (unique_amount and days <= cfg.max_lookback):
+            return None
     reasons = []
     score = 0
+    if unique_amount:
+        score += 5
+        reasons.append("المبلغ لا يتكرر في الحركات المفتوحة")
     if exact_amount:
         score += 40
         reasons.append("المبلغ متطابق")
@@ -141,9 +148,9 @@ def group_score(target: Item, group: list[Item], cfg: EngineConfig) -> tuple[int
     days = max(abs((target.date - g.date).days) for g in group)
     refs = [ref_relation(target, g)[0] for g in group]
     texts = [text_score(target, g)[0] for g in group]
-    score = 35 + date_score(days, cfg.date_window) + round(max(0, sum(refs) / len(refs))) + round(
+    score = 45 + date_score(days, cfg.date_window) + round(max(0, sum(refs) / len(refs))) + round(
         sum(texts) / len(texts))
-    score -= 3 * (len(group) - 2)
+    score -= 2 * (len(group) - 2)
     reasons = [f"مجموع {len(group)} حركات يساوي المبلغ", f"أقصى فرق تاريخ {days} يوم"]
     if max(refs) >= 20:
         reasons.append("ارتباط بالمرجع")
@@ -176,9 +183,14 @@ def propose(system: list[Item], exchanger: list[Item], cfg: EngineConfig,
     by_amount: dict[tuple[str, int], list[Item]] = {}
     for e in ex_items:
         by_amount.setdefault((e.eff_dir, e.open), []).append(e)
+    sys_count: dict[tuple[str, int], int] = {}
     for s in sys_items:
-        for e in by_amount.get((s.eff_dir, s.open), []):
-            r = score_pair(s, e, cfg, exact_amount=True)
+        sys_count[(s.eff_dir, s.open)] = sys_count.get((s.eff_dir, s.open), 0) + 1
+    for s in sys_items:
+        cands = by_amount.get((s.eff_dir, s.open), [])
+        unique = len(cands) == 1 and sys_count[(s.eff_dir, s.open)] == 1
+        for e in cands:
+            r = score_pair(s, e, cfg, exact_amount=True, unique_amount=unique)
             if r and r[0] >= cfg.min_score:
                 pairs.append((r[0], s, e, r[1]))
     # للتحقق من الغموض: أفضل درجتين لكل حركة
@@ -269,6 +281,10 @@ def propose(system: list[Item], exchanger: list[Item], cfg: EngineConfig,
             sc = 20 + max(rpts, 0) + date_score(days, cfg.date_window) + tpts
             sc = min(sc, 70)
             reasons = ["مطابقة جزئية: المبلغان مختلفان"] + [m for m in (rmsg, tmsg) if m]
+            big, small = max(s.open, e.open), min(s.open, e.open)
+            pct = (big - small) * 100 / big
+            if pct <= 3:
+                reasons.append(f"الفرق صغير ({pct:.1f}%) — قد يكون خصمًا أو عمولة، حدّد السبب")
             partials.append((sc, s, e, reasons))
     partials.sort(key=lambda x: -x[0])
     for sc, s, e, reasons in partials:

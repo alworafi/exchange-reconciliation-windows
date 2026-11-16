@@ -316,6 +316,7 @@ def load_items(conn, account_id: int, currency: str) -> tuple[list[Item], list[I
 def engine_config(conn) -> EngineConfig:
     return EngineConfig(
         date_window=int(get_setting(conn, "date_window_days")),
+        max_lookback=int(get_setting(conn, "max_lookback_days") or 120),
         min_score=int(get_setting(conn, "min_proposal_score")),
         auto_approve=get_setting(conn, "auto_approve") == "1",
         auto_min_score=int(get_setting(conn, "auto_approve_min_score")),
@@ -426,7 +427,8 @@ def unmatch(conn, match_id: int, reason: str) -> None:
               currency=m["currency"], reason=reason)
 
 
-def manual_match(conn, txn_ids: list[int], note: str = "", allow_partial: bool = True) -> int:
+def manual_match(conn, txn_ids: list[int], note: str = "", allow_partial: bool = True,
+                 diff_reason: str | None = None) -> int:
     """مطابقة يدوية لأي عدد من حركات النظام والصراف. تُعتمد مباشرة."""
     if not txn_ids:
         raise ReconError("اختر حركات للمطابقة")
@@ -472,7 +474,31 @@ def manual_match(conn, txn_ids: list[int], note: str = "", allow_partial: bool =
                      (now_iso(), user, note, mid))
         audit(conn, "مطابقة يدوية", entity="match", entity_id=mid, account_id=account_id, currency=currency,
               txns=list(txn_ids), matched=str(from_minor(matched)), partial=partial, note=note)
+        if partial and diff_reason:
+            alloc_by = defaultdict(int)
+            for tid, _, a in allocs:
+                alloc_by[tid] += a
+            for i in sel:
+                if i.open - alloc_by.get(i.id, 0) > 0:
+                    _set_reason(conn, i.id, diff_reason, note, account_id, currency)
     return mid
+
+
+def _set_reason(conn, txn_id, reason, note, account_id, currency):
+    if reason and reason not in db.DIFF_REASONS:
+        raise ReconError("سبب فرق غير معروف")
+    conn.execute("UPDATE transactions SET diff_reason=?, diff_note=? WHERE id=?", (reason or None, note, txn_id))
+    audit(conn, "تعليل فرق", entity="txn", entity_id=txn_id, account_id=account_id, currency=currency,
+          reason=db.DIFF_REASONS.get(reason, "إلغاء التعليل"), note=note)
+
+
+def set_diff_reason(conn, txn_id: int, reason: str | None, note: str = "") -> None:
+    """تعليل المتبقي المفتوح لحركة (خصم، عمولة، ...). لا يغيّر الأرصدة ولا يُنشئ قيدًا."""
+    with Tx(conn):
+        t = conn.execute("SELECT account_id, currency FROM transactions WHERE id=?", (txn_id,)).fetchone()
+        if not t:
+            raise ReconError("الحركة غير موجودة")
+        _set_reason(conn, txn_id, reason, note, t["account_id"], t["currency"])
 
 
 def _drop_conflicting_proposals(conn, txn_ids, keep):

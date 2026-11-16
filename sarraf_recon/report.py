@@ -11,7 +11,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from . import reconciliation as rc
-from .money import from_minor
+from .money import ZERO, from_minor
 from .services import KIND_LABEL, SIDE_LABEL, STATUS_LABEL, audit, match_items, match_rows, txn_rows
 from .db import Tx
 
@@ -130,11 +130,53 @@ def build_report(conn, account_id: int, date_from: date, date_to: date, path: st
                                  i.description, "مدين" if i.direction == "D" else "دائن",
                                  "مدين (عليه)" if i.eff_dir == "D" else "دائن (له)", i.amount, i.matched, i.open,
                                  "نعم" if i.in_period else "مرحّلة", "نعم" if i.is_retroactive else "",
-                                 i.age_days, i.txn_id])
+                                 i.age_days, i.reason_label, i.reason_note, i.txn_id])
         _table(sh, 1, ["العملة", "الجانب", "التاريخ", "المرجع", "الاسم", "البيان", "الاتجاه في الكشف",
                        "الأثر على الحساب", "المبلغ", "المطابَق", "المتبقي", "ضمن الفترة", "بأثر رجعي",
-                       "العمر (يوم)", "رقم الحركة"], data,
-               [8, 8, 11, 14, 20, 40, 10, 12, 15, 15, 15, 10, 9, 9, 9])
+                       "العمر (يوم)", "سبب الفرق", "توضيح السبب", "رقم الحركة"], data,
+               [8, 8, 11, 14, 20, 40, 10, 12, 15, 15, 15, 10, 9, 9, 16, 24, 9])
+
+    # ---------------- تحليل أسباب الفرق
+    sh = _sheet(wb, "تحليل أسباب الفرق")
+    sh["A1"] = "تحليل أسباب اختلاف الرصيد (الأثر على الفرق = النظام − الصراف)"
+    sh["A1"].font = TITLE_FONT
+    data = []
+
+    def effect(i):
+        return i.signed if i.side == "system" else -i.signed
+
+    for rec in recs:
+        data.append([rec.currency, "أ) فرق الرصيد الافتتاحي", "", "", "", "", rec.opening_diff])
+        for i in sorted(rec.opening_open_items, key=lambda x: x.date):
+            data.append([rec.currency, "  حركة مفتوحة في بداية الفترة", SIDE_LABEL[i.side], i.date,
+                         i.reference, i.description, effect(i)])
+        data.append([rec.currency, "  فرق الأرصدة الأساسية (غير مفصّل بحركات)", "", "", "", "", rec.base_diff])
+        data.append([rec.currency, "  غير مفسَّر في الافتتاحي بعد ما سبق", "", "", "", "",
+                     rec.opening_unexplained - rec.base_diff])
+        data.append([rec.currency, "ب) فرق حركات الفترة", "", "", "", "", rec.movement_diff])
+        mov_explained = ZERO
+        for i in rec.settled_during_period():
+            end_open = next((x.open for x in rec.open_items if (x.side, x.txn_id) == (i.side, i.txn_id)), ZERO)
+            delta = (i.open - end_open) * (1 if i.eff_dir == "D" else -1) * (1 if i.side == "system" else -1)
+            mov_explained += -delta
+            data.append([rec.currency, "  حركة قديمة طوبقت خلال الفترة (تُطفئ جزءًا من فرق الافتتاحي)",
+                         SIDE_LABEL[i.side], i.date, i.reference, i.description, -delta])
+        for i in sorted((x for x in rec.open_items if x.in_period), key=lambda x: x.date):
+            mov_explained += effect(i)
+            data.append([rec.currency, f"  حركة الفترة ما زالت مفتوحة ({i.reason_label})", SIDE_LABEL[i.side],
+                         i.date, i.reference, i.description, effect(i)])
+        data.append([rec.currency, "  غير مفسَّر في حركات الفترة", "", "", "", "", rec.movement_diff - mov_explained])
+        data.append([rec.currency, "ج) فرق الرصيد الختامي", "", "", "", "", rec.closing_diff])
+        for k, v in sorted(rec.reason_totals().items(), key=lambda x: -abs(x[1])):
+            data.append([rec.currency, f"  حسب السبب: {k}", "", "", "", "", v])
+        data.append([rec.currency, "  غير مفسَّر بحركات", "", "", "", "", rec.unexplained])
+        data.append(["", "", "", "", "", "", None])
+    _table(sh, 3, ["العملة", "البند", "الجانب", "التاريخ", "المرجع", "البيان", "الأثر على الفرق"], data,
+           [8, 58, 8, 11, 14, 40, 18])
+    for row in sh.iter_rows(min_row=4):
+        if row[1].value and not str(row[1].value).startswith("  "):
+            for c in row:
+                c.font = BOLD
 
     open_sheet("موجود بالنظام فقط", lambda i: i.category == "system_only")
     open_sheet("موجود بالصراف فقط", lambda i: i.category == "exchanger_only")

@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -203,9 +203,21 @@ DEFAULT_CURRENCIES = [
     ("USD", "دولار أمريكي", 3),
 ]
 
+DIFF_REASONS = {
+    "discount": "خصم متفق عليه",
+    "commission": "عمولة الصراف",
+    "fx": "فرق سعر صرف",
+    "fees": "رسوم تحويل",
+    "entry_error": "خطأ إدخال",
+    "reversal": "مرتجع / قيد عكسي",
+    "pending": "بانتظار التسجيل أو التنفيذ",
+    "other": "سبب آخر",
+}
+
 DEFAULT_SETTINGS = {
     "user_name": "المحاسب",
-    "date_window_days": "15",
+    "date_window_days": "30",
+    "max_lookback_days": "120",
     "auto_approve": "1",
     "auto_approve_min_score": "85",
     "min_proposal_score": "45",
@@ -266,6 +278,15 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.executemany(
             "INSERT OR IGNORE INTO settings(key, value) VALUES (?,?)", DEFAULT_SETTINGS.items()
         )
+        conn.execute("PRAGMA user_version = 1")
+        version = 1
+    if version < 2:
+        # تعليل الفروقات: سبب المتبقي المفتوح لكل حركة (خصم، عمولة، ...) بدون أي قيد تسوية
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+        if "diff_reason" not in cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN diff_reason TEXT")
+            conn.execute("ALTER TABLE transactions ADD COLUMN diff_note TEXT")
+        conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('max_lookback_days', '120')")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
