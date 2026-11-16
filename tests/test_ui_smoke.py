@@ -38,10 +38,20 @@ def test_all_pages_open_with_demo_data(env, tmp_path):
     win.resize(1400, 860)
     win.show()
     shots = os.environ.get("UI_SHOTS")
-    for i in range(win.nav.count()):
+    assert win.nav.count() == 7
+    targets = []
+    for i, p in enumerate(win.pages):
+        if hasattr(p, "tabs"):
+            targets += [(i, j, sub) for j, sub in enumerate(p.pages)]
+        else:
+            targets.append((i, None, p))
+    for n, (i, j, page) in enumerate(targets):
         win.nav.setCurrentRow(i)
+        if j is not None:
+            win.pages[i].tabs.setCurrentIndex(j)
         app.processEvents()
-        page = win.pages[i]
+        page.refresh()
+        app.processEvents()
         if hasattr(page, "table") and page.table.model().rowCount():
             t = page.table
             rect = t.visualRect(t.model().index(t.model().rowCount() - 1, 1))
@@ -49,7 +59,7 @@ def test_all_pages_open_with_demo_data(env, tmp_path):
             app.processEvents()
             assert t.selected(), f"page {i}: click did not select a row"
         if shots:
-            win.grab().save(str(Path(shots) / f"{i:02d}.png"))
+            win.grab().save(str(Path(shots) / f"{n:02d}.png"))
     dash = win.pages[0]
     assert dash.table.model().rowCount() == 2          # YER + SAR
     win.nav.setCurrentRow(0)
@@ -57,4 +67,4 @@ def test_all_pages_open_with_demo_data(env, tmp_path):
     rect = dash.table.visualRect(dash.table.model().index(0, 1))
     QTest.mouseClick(dash.table.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
     assert "لماذا يختلف الرصيد" in dash.detail.toPlainText()
-    assert win.pages[3].table.model().rowCount() >= 1   # مقترحات
+    assert win.pages[3].pages[0].table.model().rowCount() >= 1   # مقترحات

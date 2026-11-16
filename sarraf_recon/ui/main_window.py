@@ -7,21 +7,24 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem
 from .. import APP_NAME, __version__
 from . import pages
 
+# القائمة المبسطة: 7 صفحات. الصفحات المتقاربة تبويبات داخل صفحة واحدة.
 NAV = [
-    ("اللوحة الرئيسية", pages.DashboardPage),
-    ("حسابات الصرافين", pages.AccountsPage),
+    ("الرئيسية", pages.DashboardPage),
+    ("الصرافين", pages.AccountsPage),
     ("استيراد كشف", pages.ImportPage),
-    ("المطابقات المقترحة", pages.ProposedPage),
-    ("المطابقة اليدوية", pages.ManualMatchPage),
-    ("المطابقات المعتمدة", pages.ApprovedPage),
-    ("الموجود بالنظام فقط", pages.SystemOnlyPage),
-    ("الموجود بالصراف فقط", pages.ExchangerOnlyPage),
-    ("الحركات بأثر رجعي", pages.RetroPage),
-    ("التكرارات المشتبه بها", pages.DuplicatesPage),
-    ("المفكوكة والمرفوضة", pages.HistoryMatchesPage),
-    ("سجل المطابقات", pages.AuditPage),
-    ("تقرير Excel", pages.ReportPage),
-    ("الإعدادات", pages.SettingsPage),
+    ("المطابقة", ("المطابقة", [("① المقترحات — تحتاج قرارك", pages.ProposedPage),
+                               ("② المطابقة اليدوية", pages.ManualMatchPage)])),
+    ("غير المطابق", ("الحركات غير المطابقة — تبقى مفتوحة حتى تُطابق",
+                     [("موجود بالنظام فقط (لم يحوّل)", pages.SystemOnlyPage),
+                      ("موجود بالصراف فقط (لم يُسجّل)", pages.ExchangerOnlyPage),
+                      ("مكرر مشتبه", pages.DuplicatesPage),
+                      ("بأثر رجعي", pages.RetroPage)])),
+    ("المعتمد والسجل", ("المطابقات المعتمدة والسجل",
+                         [("المعتمدة (فك المطابقة)", pages.ApprovedPage),
+                          ("المفكوكة والمرفوضة", pages.HistoryMatchesPage),
+                          ("سجل كل العمليات", pages.AuditPage)])),
+    ("التقرير والإعدادات", ("التقرير والإعدادات",
+                            [("تقرير Excel", pages.ReportPage), ("الإعدادات", pages.SettingsPage)])),
 ]
 
 
@@ -50,8 +53,8 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.pages = []
-        for label, cls in NAV:
-            p = cls(self)
+        for label, spec in NAV:
+            p = pages.TabsPage(self, spec[0], spec[1]) if isinstance(spec, tuple) else spec(self)
             self.pages.append(p)
             self.stack.addWidget(p)
             self.nav.addItem(QListWidgetItem(label))
@@ -67,8 +70,9 @@ class MainWindow(QMainWindow):
 
     def go(self, cls):
         for i, p in enumerate(self.pages):
-            if isinstance(p, cls) and type(p) is cls:
+            if type(p) is cls or (isinstance(p, pages.TabsPage) and p.show_page(cls)):
                 self.nav.setCurrentRow(i)
+                self.pages[i].refresh()
                 return
 
     def data_changed(self):

@@ -38,6 +38,9 @@ QLineEdit, QComboBox, QDateEdit, QSpinBox, QPlainTextEdit { background: #ffffff;
 QGroupBox { border: 1px solid #d5dedc; border-radius: 4px; margin-top: 14px; padding: 10px; background: #fafcfb; }
 QGroupBox::title { subcontrol-origin: margin; right: 10px; padding: 0 4px; color: #16323a; font-weight: 600; }
 QStatusBar { background: #e3ecea; }
+QTabWidget::pane { border: 1px solid #d5dedc; background: #f4f6f5; }
+QTabBar::tab { background: #e3ecea; color: #16323a; padding: 7px 16px; border: 1px solid #d0dad8; margin-left: 2px; }
+QTabBar::tab:selected { background: #ffffff; font-weight: 600; border-bottom: 2px solid #d9a441; }
 """
 
 

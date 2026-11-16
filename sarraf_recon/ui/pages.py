@@ -38,9 +38,9 @@ class Page(QWidget):
         self.win = win
         self.conn = win.conn
         self.lay = QVBoxLayout(self)
-        h = QLabel(self.title)
-        h.setObjectName("pageTitle")
-        self.lay.addWidget(h)
+        self.title_lbl = QLabel(self.title)
+        self.title_lbl.setObjectName("pageTitle")
+        self.lay.addWidget(self.title_lbl)
 
     def refresh(self):
         pass
@@ -78,6 +78,10 @@ class DashboardPage(Page):
         super().__init__(win)
         bar = QHBoxLayout()
         self.d_from, self.d_to = period_box(self)
+        steps = QLabel("خطوات العمل:  ١ أضف الصراف  ←  ٢ استورد كشف النظام  ←  ٣ استورد كشف الصراف  ←  "
+                       "٤ راجع المقترحات  ←  ٥ طابق الباقي يدويًا  ←  ٦ صدّر التقرير")
+        steps.setObjectName("totals")
+        self.lay.addWidget(steps)
         bar.addWidget(QLabel("الفترة من"))
         bar.addWidget(self.d_from)
         bar.addWidget(QLabel("إلى"))
@@ -255,6 +259,41 @@ class LinkDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         f.addRow(bb)
+
+
+# ====================================================================== صفحة بتبويبات
+
+class TabsPage(QWidget):
+    """يجمع عدة صفحات متقاربة في صفحة واحدة بتبويبات لتبسيط القائمة."""
+
+    def __init__(self, win, title: str, tabs: list):
+        from PySide6.QtWidgets import QTabWidget
+        super().__init__()
+        self.win = win
+        lay = QVBoxLayout(self)
+        t = QLabel(title)
+        t.setObjectName("pageTitle")
+        lay.addWidget(t)
+        self.tabs = QTabWidget()
+        self.pages = []
+        for label, cls in tabs:
+            p = cls(win)
+            p.title_lbl.setVisible(False)
+            p.lay.setContentsMargins(4, 8, 4, 4)
+            self.pages.append(p)
+            self.tabs.addTab(p, label)
+        self.tabs.currentChanged.connect(lambda i: self.pages[i].refresh())
+        lay.addWidget(self.tabs, 1)
+
+    def refresh(self):
+        self.pages[self.tabs.currentIndex()].refresh()
+
+    def show_page(self, cls) -> bool:
+        for i, p in enumerate(self.pages):
+            if type(p) is cls:
+                self.tabs.setCurrentIndex(i)
+                return True
+        return False
 
 
 # ====================================================================== الحسابات
@@ -982,25 +1021,32 @@ class SettingsPage(Page):
 
     def __init__(self, win):
         super().__init__(win)
-        g = QGroupBox("المطابقة")
+        g = QGroupBox("الأساسي")
         f = QFormLayout(g)
         self.user = QLineEdit()
         self.window = QSpinBox()
         self.window.setRange(0, 365)
-        self.auto = QCheckBox("اعتماد المطابقات عالية الثقة تلقائيًا")
+        self.auto = QCheckBox("اعتماد المطابقات المؤكدة تلقائيًا (نفس المرجع والمبلغ والاسم وتاريخ قريب)")
         self.auto_min = QSpinBox()
         self.auto_min.setRange(70, 100)
         self.min_score = QSpinBox()
         self.min_score.setRange(20, 90)
         self.group = QSpinBox()
         self.group.setRange(2, 6)
-        f.addRow("اسم المستخدم (يظهر في السجل)", self.user)
-        f.addRow("نافذة فرق التاريخ (أيام)", self.window)
+        f.addRow("اسمك (يظهر في السجل)", self.user)
         f.addRow("", self.auto)
-        f.addRow("أقل درجة للاعتماد التلقائي", self.auto_min)
-        f.addRow("أقل درجة لعرض المقترح", self.min_score)
-        f.addRow("أقصى عدد حركات في المطابقة المركبة", self.group)
         self.lay.addWidget(g)
+        self.adv_toggle = QCheckBox("إظهار الإعدادات المتقدمة")
+        self.lay.addWidget(self.adv_toggle)
+        adv = QGroupBox("متقدم — لا تغيّرها إلا عند الحاجة")
+        fa = QFormLayout(adv)
+        fa.addRow("نافذة فرق التاريخ (أيام)", self.window)
+        fa.addRow("أقل درجة للاعتماد التلقائي", self.auto_min)
+        fa.addRow("أقل درجة لعرض المقترح", self.min_score)
+        fa.addRow("أقصى عدد حركات في المطابقة المركبة", self.group)
+        adv.setVisible(False)
+        self.adv_toggle.toggled.connect(adv.setVisible)
+        self.lay.addWidget(adv)
         self.lay.addWidget(button("حفظ الإعدادات", self.save, primary=True))
         g2 = QGroupBox("البيانات")
         v = QVBoxLayout(g2)
