@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from itertools import combinations
 
-from .textnorm import normalize_ref, numbers_in, similarity
+from .textnorm import normalize, normalize_ref, numbers_in, similarity
 
 
 @dataclass
@@ -65,6 +65,8 @@ class EngineConfig:
     max_group: int = 4
     max_candidates: int = 16
     max_many_side: int = 6
+    # أسماء مرتبطة: [(اسم موحّد أ، اسم موحّد ب، الاسمان للعرض)]
+    party_links: list = field(default_factory=list)
 
 
 # ------------------------------------------------------------------ scoring
@@ -102,7 +104,35 @@ def date_score(days: int, window: int) -> int:
     return 0
 
 
-def text_score(a: Item, b: Item) -> tuple[int, str | None]:
+def _has_name(text_norm: str, name_norm: str) -> bool:
+    return bool(name_norm) and f" {name_norm} " in f" {text_norm} "
+
+
+def linked_party(a: Item, b: Item, cfg: "EngineConfig | None") -> str | None:
+    """هل حوّل شخص مرتبط عن صاحب الحركة؟ (مثلًا الأخ يحوّل عن أخيه)"""
+    if not cfg or not cfg.party_links:
+        return None
+    ta, tb = normalize(a.text), normalize(b.text)
+    for na, nb, label in cfg.party_links:
+        if (_has_name(ta, na) and _has_name(tb, nb)) or (_has_name(ta, nb) and _has_name(tb, na)):
+            return label
+    return None
+
+
+def names_conflict(a: Item, b: Item, cfg: "EngineConfig | None" = None) -> bool:
+    """اسم الطرف مختلف بوضوح في الجانبين، أو المطابقة قائمة على اسم مرتبط (شخص آخر حوّل عنه).
+    في الحالتين لا يُعتمد شيء تلقائيًا: القرار للمستخدم."""
+    if linked_party(a, b, cfg):
+        return True
+    if a.party.strip() and b.party.strip():
+        return similarity(a.party, b.party) < 0.5
+    return False
+
+
+def text_score(a: Item, b: Item, cfg: "EngineConfig | None" = None) -> tuple[int, str | None]:
+    link = linked_party(a, b, cfg)
+    if link:
+        return 15, f"اسم مرتبط: {link}"
     sim = similarity(a.text, b.text)
     pts = round(15 * sim)
     if pts >= 9:
@@ -137,7 +167,7 @@ def score_pair(a: Item, b: Item, cfg: EngineConfig, exact_amount: bool = True,
     dpts = date_score(days, cfg.date_window)
     score += dpts
     reasons.append("نفس التاريخ" if days == 0 else f"فرق التاريخ {days} يوم")
-    tpts, tmsg = text_score(a, b)
+    tpts, tmsg = text_score(a, b, cfg)
     score += tpts
     if tmsg:
         reasons.append(tmsg)
@@ -147,7 +177,7 @@ def score_pair(a: Item, b: Item, cfg: EngineConfig, exact_amount: bool = True,
 def group_score(target: Item, group: list[Item], cfg: EngineConfig) -> tuple[int, list[str]]:
     days = max(abs((target.date - g.date).days) for g in group)
     refs = [ref_relation(target, g)[0] for g in group]
-    texts = [text_score(target, g)[0] for g in group]
+    texts = [text_score(target, g, cfg)[0] for g in group]
     score = 45 + date_score(days, cfg.date_window) + round(max(0, sum(refs) / len(refs))) + round(
         sum(texts) / len(texts))
     score -= 2 * (len(group) - 2)
@@ -209,7 +239,10 @@ def propose(system: list[Item], exchanger: list[Item], cfg: EngineConfig,
         if ambiguous:
             reasons.append("يوجد مرشح آخر قريب - يحتاج مراجعة")
         p = Proposal("one_to_one", [(s.id, "system", s.open), (e.id, "exchanger", e.open)], sc, reasons)
-        p.auto_ok = cfg.auto_approve and sc >= cfg.auto_min_score and not ambiguous
+        conflict = names_conflict(s, e, cfg)
+        if conflict:
+            reasons.append("الاسم مختلف — يحتاج تأكيدك")
+        p.auto_ok = cfg.auto_approve and sc >= cfg.auto_min_score and not ambiguous and not conflict
         take(p)
 
     # 2) حركة مقابل عدة حركات (وبالعكس) بمجموع مساوٍ
@@ -274,7 +307,7 @@ def propose(system: list[Item], exchanger: list[Item], cfg: EngineConfig,
                 continue
             rpts, rmsg = ref_relation(s, e)
             days = abs((s.date - e.date).days)
-            tpts, tmsg = text_score(s, e)
+            tpts, tmsg = text_score(s, e, cfg)
             strong_text = tpts >= 10 and days <= 3
             if rpts < 20 and not strong_text:
                 continue

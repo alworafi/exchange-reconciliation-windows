@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -287,6 +287,19 @@ def migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE transactions ADD COLUMN diff_reason TEXT")
             conn.execute("ALTER TABLE transactions ADD COLUMN diff_note TEXT")
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('max_lookback_days', '120')")
+        conn.execute("PRAGMA user_version = 2")
+        version = 2
+    if version < 3:
+        # أسماء مرتبطة: شخص يحوّل عن صاحب الفاتورة (أخ، قريب، وكيل)
+        conn.execute("""CREATE TABLE IF NOT EXISTS party_links (
+            id          INTEGER PRIMARY KEY,
+            account_id  INTEGER REFERENCES accounts(id),   -- NULL = لكل الحسابات
+            name_a      TEXT NOT NULL,
+            name_b      TEXT NOT NULL,
+            note        TEXT,
+            created_at  TEXT NOT NULL,
+            created_by  TEXT
+        )""")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 

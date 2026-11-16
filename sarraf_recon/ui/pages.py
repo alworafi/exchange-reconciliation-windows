@@ -222,6 +222,41 @@ class ReasonDialog(QDialog):
         f.addRow(bb)
 
 
+class LinkDialog(QDialog):
+    """ربط اسمين: شخص يحوّل عن صاحب الفاتورة (أخ، قريب، وكيل)."""
+
+    def __init__(self, parent, conn, name_a="", name_b="", account_id=None):
+        super().__init__(parent)
+        self.setWindowTitle("ربط اسمين")
+        self.resize(520, 0)
+        f = QFormLayout(self)
+        self.a = QLineEdit(name_a)
+        self.b = QLineEdit(name_b)
+        self.scope = QComboBox()
+        if account_id:
+            self.scope.addItem("لهذا الصراف فقط", account_id)
+        self.scope.addItem("لكل الصرافين", None)
+        if not account_id:
+            for acc in services.accounts(conn):
+                self.scope.addItem(f"للصراف: {acc['name']}", acc["id"])
+        self.note = QLineEdit()
+        self.note.setPlaceholderText("مثال: أخوه / وكيله / ابن عمه")
+        f.addRow("صاحب الفاتورة (كما في النظام)", self.a)
+        f.addRow("المحوِّل (كما في كشف الصراف)", self.b)
+        f.addRow("النطاق", self.scope)
+        f.addRow("العلاقة", self.note)
+        lbl = QLabel("اكتب الاسم كما يظهر في البيان أو خانة الاسم، ويُفضّل اسمين أو ثلاثة لتجنّب الخلط. بعد الربط "
+                     "يعامل محرك المطابقة الاسمين كطرف واحد ويذكر ذلك في أسباب المقترح، لكنه لا يعتمد تلقائيًا "
+                     "بسبب الاسم وحده.")
+        lbl.setWordWrap(True)
+        lbl.setObjectName("hint")
+        f.addRow(lbl)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+
 # ====================================================================== الحسابات
 
 class AccountDialog(QDialog):
@@ -295,8 +330,31 @@ class AccountsPage(Page):
                                                                   width=150, color_sign=True),
                           Col("المصدر", "source", width=90), Col("ملاحظة", "note")])
         self.lay.addWidget(self.bal, 1)
+        lb = QHBoxLayout()
+        lb.addWidget(QLabel("الأسماء المرتبطة (شخص يحوّل عن صاحب الفاتورة):"))
+        lb.addStretch(1)
+        lb.addWidget(button("ربط اسمين...", self.add_link))
+        lb.addWidget(button("حذف الربط", self.del_link))
+        self.lay.addLayout(lb)
+        self.links = Table([Col("صاحب الفاتورة", "name_a", width=200), Col("المحوِّل", "name_b", width=200),
+                            Col("النطاق", "scope", width=150), Col("العلاقة", "note", width=150),
+                            Col("أضيف بواسطة", "created_by", width=100), Col("التاريخ", "created_at")])
+        self.lay.addWidget(self.links, 1)
+
+    def add_link(self):
+        d = LinkDialog(self, self.conn)
+        if d.exec():
+            self.guard(services.add_party_link, self.conn, d.a.text(), d.b.text(), d.scope.currentData(),
+                       d.note.text(), ok_msg="حُفظ الربط")
+
+    def del_link(self):
+        r = self.links.current()
+        if r and confirm(self, f"حذف الربط بين {r['name_a']} و{r['name_b']}؟"):
+            self.guard(services.delete_party_link, self.conn, r["id"], ok_msg="حُذف الربط")
 
     def refresh(self):
+        self.links.set_rows([{**dict(l), "scope": l["account_name"] or "كل الصرافين"}
+                             for l in services.party_links(self.conn)])
         self.table.set_rows([{**dict(a), "mirror_t": "عكسي (من منظور الصراف)" if a["mirror"] else "نفس اتجاه النظام"}
                              for a in services.accounts(self.conn)])
         src = {"statement": "من الكشف", "derived": "مستنتج", "manual": "يدوي"}
@@ -536,6 +594,10 @@ class ProposedPage(MatchListPage):
             return
         done = 0
         for r in rows:
+            names = services.match_name_warning(self.conn, r["id"])
+            if names and not confirm(self, f"المطابقة {r['id']} بين اسمين مختلفين:\n\n" + "\n".join(names) +
+                                     f"\n\nالمبلغ: {fmt(r['amount'])}\n\nهل أنت متأكد أن هذه الحوالة تخص هذه الفاتورة؟"):
+                continue
             try:
                 services.approve_match(self.conn, r["id"])
                 done += 1
@@ -682,7 +744,10 @@ class ManualMatchPage(Page):
         self.search.textChanged.connect(self.load)
         self.allow_partial = QCheckBox("السماح بمطابقة جزئية (يبقى الفرق مفتوحًا)")
         self.allow_partial.setChecked(True)
-        for w in (QLabel("الحساب"), self.account, QLabel("العملة"), self.currency, self.search, self.allow_partial):
+        self.other_payer = QCheckBox("حوّلها شخص آخر عن صاحب الفاتورة")
+        self.other_payer.setToolTip("بعد المطابقة يمكنك ربط الاسمين حتى يتعرف عليهما المحرك في المرات القادمة")
+        for w in (QLabel("الحساب"), self.account, QLabel("العملة"), self.currency, self.search, self.allow_partial,
+                  self.other_payer):
             bar.addWidget(w)
         bar.addWidget(button("مطابقة المحدد", self.match, primary=True))
         self.lay.addLayout(bar)
@@ -758,8 +823,26 @@ class ManualMatchPage(Page):
             note = ask_text(self, "مطابقة يدوية", "ملاحظة (اختياري) — تُحفظ في سجل المطابقات:")
             if note is None:
                 return
+        sel_s, sel_e = self.sys.selected(), self.ex.selected()
+        names = services.name_differences(self.conn, ids)
+        if names or self.other_payer.isChecked():
+            msg = ("الاسم في الفاتورة يختلف عن اسم المحوِّل:\n\n" + "\n".join(names) + "\n\n") if names else ""
+            if not confirm(self, msg + f"مجموع النظام {fmt(ts)} — مجموع الصراف {fmt(te)}\n\n"
+                                       "هل أنت متأكد أن هذا المبلغ حُوّل عن صاحب الفاتورة وتريد مطابقته؟"):
+                return
+        if self.other_payer.isChecked():
+            payer = sel_e[0]["counterparty"] or sel_e[0]["description"]
+            owner = sel_s[0]["counterparty"] or sel_s[0]["description"]
+            note = (note + " — " if note else "") + f"حوّلها شخص آخر عن صاحب الفاتورة: {payer}"
         r = self.guard(services.manual_match, self.conn, ids, note, self.allow_partial.isChecked(), reason,
                        ok_msg="تمت المطابقة اليدوية")
+        if r and self.other_payer.isChecked() and confirm(
+                self, "هل تريد ربط الاسمين حتى يقترح البرنامج هذه الحالة تلقائيًا في المرات القادمة؟"):
+            d = LinkDialog(self, self.conn, owner, payer, self.account.currentData())
+            if d.exec():
+                self.guard(services.add_party_link, self.conn, d.a.text(), d.b.text(), d.scope.currentData(),
+                           d.note.text(), ok_msg="حُفظ الربط")
+            self.other_payer.setChecked(False)
         if r:
             self.load()
 

@@ -125,3 +125,75 @@ def test_balance_difference_cause_analysis(env):
     assert rows["  غير مفسَّر في حركات الفترة"] == 0
     assert rows["  غير مفسَّر في الافتتاحي بعد ما سبق"] == 0
     assert rows["  غير مفسَّر بحركات"] == 0
+
+
+def test_transfer_by_relative_for_invoice_in_another_name(env):
+    """الأخ يحوّل عن أخيه: الفاتورة باسم محمد سعيد والحوالة من علي سعيد."""
+    conn = env["conn"]
+    sys_rows = [(D(2026, 10, 1), "", "فاتورة محمد سعيد الحداد", 120_000, None)]
+    ex_rows = [(D(2026, 10, 3), "", "حوالة من علي سعيد الحداد", None, 120_000),
+               (D(2026, 10, 3), "", "حوالة من صالح ناجي", None, 120_000)]   # منافس بنفس المبلغ
+
+    # 1) بدون ربط: المطابقة اليدوية مسموحة رغم اختلاف الاسم
+    acc = _setup(env, sys_rows, ex_rows, "بدون_ربط")
+    s = conn.execute("SELECT id FROM transactions WHERE account_id=? AND side='system'", (acc,)).fetchone()[0]
+    e = conn.execute("SELECT id FROM transactions WHERE account_id=? AND description LIKE '%علي%'",
+                     (acc,)).fetchone()[0]
+    services.manual_match(conn, [s, e], "حوّلها أخوه علي")
+    assert rc.compute(conn, acc, "YER", *P).category_totals()["system_only"]["count"] == 0
+
+    # 2) مع ربط الاسمين: المحرك يفضّل حوالة الأخ على المنافس ويذكر السبب
+    acc2 = _setup(env, sys_rows, ex_rows, "مع_ربط")
+    services.add_party_link(conn, "محمد سعيد الحداد", "علي سعيد الحداد", acc2, "أخوه")
+    services.run_matching(conn, acc2)
+    [p] = services.match_rows(conn, "proposed", acc2)
+    items = services.match_items(conn, p["id"])
+    assert any("علي" in (i["description"] or "") for i in items)
+    assert "اسم مرتبط" in p["reasons"]
+    # الربط خاص بهذا الحساب فقط
+    assert services.party_links(conn, acc) == []
+
+
+def test_party_link_validation(env):
+    import pytest
+    from sarraf_recon.services import ReconError
+    conn = env["conn"]
+    with pytest.raises(ReconError):
+        services.add_party_link(conn, "أحمد", "احمد")          # نفس الاسم بعد التوحيد
+    lid = services.add_party_link(conn, "محمد سعيد", "علي سعيد")
+    services.delete_party_link(conn, lid)
+    assert services.party_links(conn) == []
+
+
+def test_different_name_is_never_auto_approved_even_with_strong_evidence(env):
+    """نفس المرجع والمبلغ والتاريخ (درجة عالية) لكن المحوِّل شخص آخر: يُعرض للتأكيد ولا يُعتمد وحده."""
+    conn = env["conn"]
+    acc = services.create_account(conn, "صراف")
+    from openpyxl import Workbook
+
+    def stmt(path, rows):
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["التاريخ", "المرجع", "البيان", "الاسم", "مدين", "دائن"])
+        for r in rows:
+            ws.append(r)
+        wb.save(path)
+        return path
+
+    s = stmt(env["dir"] / "s.xlsx", [[D(2026, 10, 1), "R55", "فاتورة", "محمد سعيد الحداد", 90_000, None],
+                                     [D(2026, 10, 1), "R56", "فاتورة", "ناصر علي", 40_000, None]])
+    e = stmt(env["dir"] / "e.xlsx", [[D(2026, 10, 1), "R55", "حوالة", "علي سعيد الحداد", None, 90_000],
+                                     [D(2026, 10, 1), "R56", "حوالة", "ناصر علي", None, 40_000]])
+    do_import(env, acc, "system", s)
+    do_import(env, acc, "exchanger", e)
+    services.add_party_link(conn, "محمد سعيد الحداد", "علي سعيد الحداد", acc)
+    res = services.run_matching(conn, acc)
+    assert res == {"auto_approved": 1, "proposed": 1}          # ناصر علي تلقائيًا، الحداد للتأكيد
+    [p] = services.match_rows(conn, "proposed", acc)
+    assert "الاسم مختلف — يحتاج تأكيدك" in p["reasons"]
+    assert services.match_name_warning(conn, p["id"])          # الواجهة ستطلب التأكيد
+    ids = [i["txn_id"] for i in services.match_items(conn, p["id"])]
+    assert services.name_differences(conn, ids)
+    # نفس الاسم: لا يطلب تأكيدًا
+    [a] = services.match_rows(conn, "approved", acc)
+    assert services.match_name_warning(conn, a["id"]) == []

@@ -14,7 +14,8 @@ from pathlib import Path
 
 from . import db
 from .db import Tx, get_setting, now_iso
-from .engine import EngineConfig, Item, Proposal, allocate, kind_for, make_signature, propose
+from .engine import (EngineConfig, Item, Proposal, allocate, kind_for, linked_party, make_signature,
+                     names_conflict, propose)
 from .importers.base import Mapping, ParseResult
 from .money import from_minor, to_minor
 from .textnorm import normalize, normalize_ref, numbers_in, similarity
@@ -313,8 +314,11 @@ def load_items(conn, account_id: int, currency: str) -> tuple[list[Item], list[I
     return sys_items, ex_items
 
 
-def engine_config(conn) -> EngineConfig:
+def engine_config(conn, account_id: int | None = None) -> EngineConfig:
+    links = [(normalize(r["name_a"]), normalize(r["name_b"]), f"{r['name_a']} ↔ {r['name_b']}")
+             for r in party_links(conn, account_id)]
     return EngineConfig(
+        party_links=links,
         date_window=int(get_setting(conn, "date_window_days")),
         max_lookback=int(get_setting(conn, "max_lookback_days") or 120),
         min_score=int(get_setting(conn, "min_proposal_score")),
@@ -358,7 +362,7 @@ def _check_available(conn, match_id: int) -> None:
 def run_matching(conn, account_id: int, currency: str | None = None) -> dict:
     """يعيد توليد المقترحات للحركات المفتوحة فقط. المطابقات المعتمدة لا تُمس."""
     user = current_user(conn)
-    cfg = engine_config(conn)
+    cfg = engine_config(conn, account_id)
     curs = [currency] if currency else [r["currency"] for r in conn.execute(
         "SELECT DISTINCT currency FROM transactions WHERE account_id=?", (account_id,))]
     rejected = {r["signature"] for r in conn.execute(
@@ -510,6 +514,79 @@ def _drop_conflicting_proposals(conn, txn_ids, keep):
         ph = ",".join("?" * len(ids))
         conn.execute(f"DELETE FROM match_items WHERE match_id IN ({ph})", ids)
         conn.execute(f"DELETE FROM matches WHERE id IN ({ph})", ids)
+
+
+def name_differences(conn, txn_ids: list[int]) -> list[str]:
+    """يعيد وصفًا لكل زوج (نظام، صراف) اسماه مختلفان أو مرتبطان، حتى تطلب الواجهة تأكيد المستخدم.
+    قائمة فارغة = لا يوجد اختلاف واضح في الأسماء."""
+    rows = conn.execute(f"SELECT * FROM transactions WHERE id IN ({','.join('?' * len(txn_ids))})",
+                        list(txn_ids)).fetchall()
+    if not rows:
+        return []
+    cfg = engine_config(conn, rows[0]["account_id"])
+
+    def item(t):
+        return Item(id=t["id"], side=t["side"], eff_dir="D", open=0, amount=0, date=date.fromisoformat(t["txn_date"]),
+                    ref=t["reference"] or "", desc=t["description"] or "", party=t["counterparty"] or "")
+
+    out = []
+    sys_i = [item(t) for t in rows if t["side"] == "system"]
+    ex_i = [item(t) for t in rows if t["side"] == "exchanger"]
+    for a in sys_i:
+        for b in ex_i:
+            link = linked_party(a, b, cfg)
+            if link:
+                out.append(f"اسم مرتبط ({link}): «{a.text}» ↔ «{b.text}»")
+            elif names_conflict(a, b, cfg) or (a.text and b.text and similarity(a.text, b.text) < 0.3):
+                out.append(f"النظام: «{a.text}»  ↔  الصراف: «{b.text}»")
+    return out
+
+
+def match_name_warning(conn, match_id: int) -> list[str]:
+    reasons = json.loads(conn.execute("SELECT reasons FROM matches WHERE id=?", (match_id,)).fetchone()[0] or "[]")
+    if not any(r.startswith("اسم مرتبط") or r.startswith("الاسم مختلف") for r in reasons):
+        return []
+    ids = [r["txn_id"] for r in conn.execute("SELECT txn_id FROM match_items WHERE match_id=?", (match_id,))]
+    return name_differences(conn, ids)
+
+
+# ------------------------------------------------------------------ party links
+
+def party_links(conn, account_id: int | None = None):
+    """الأسماء المرتبطة العامة + الخاصة بالحساب."""
+    if account_id:
+        return conn.execute("SELECT l.*, a.name account_name FROM party_links l LEFT JOIN accounts a"
+                            " ON a.id=l.account_id WHERE l.account_id IS NULL OR l.account_id=? ORDER BY l.id",
+                            (account_id,)).fetchall()
+    return conn.execute("SELECT l.*, a.name account_name FROM party_links l LEFT JOIN accounts a"
+                        " ON a.id=l.account_id ORDER BY l.id").fetchall()
+
+
+def add_party_link(conn, name_a: str, name_b: str, account_id: int | None = None, note: str = "") -> int:
+    """يربط اسمين (مثلًا: الأخ يحوّل عن أخيه) حتى يعاملهما محرك المطابقة كطرف واحد."""
+    a, b = (name_a or "").strip(), (name_b or "").strip()
+    if not a or not b:
+        raise ReconError("أدخل الاسمين")
+    if normalize(a) == normalize(b):
+        raise ReconError("الاسمان متطابقان، لا حاجة للربط")
+    if len(normalize(a)) < 3 or len(normalize(b)) < 3:
+        raise ReconError("الاسم قصير جدًا. اكتب الاسم كما يظهر في الكشف (مثلًا: علي سعيد)")
+    with Tx(conn):
+        cur = conn.execute("INSERT INTO party_links(account_id, name_a, name_b, note, created_at, created_by)"
+                           " VALUES (?,?,?,?,?,?)", (account_id, a, b, note, now_iso(), current_user(conn)))
+        audit(conn, "ربط أسماء", entity="party_link", entity_id=cur.lastrowid, account_id=account_id,
+              name_a=a, name_b=b, note=note)
+    return cur.lastrowid
+
+
+def delete_party_link(conn, link_id: int) -> None:
+    with Tx(conn):
+        r = conn.execute("SELECT * FROM party_links WHERE id=?", (link_id,)).fetchone()
+        if not r:
+            raise ReconError("الربط غير موجود")
+        conn.execute("DELETE FROM party_links WHERE id=?", (link_id,))
+        audit(conn, "حذف ربط أسماء", entity="party_link", entity_id=link_id, account_id=r["account_id"],
+              name_a=r["name_a"], name_b=r["name_b"])
 
 
 # ------------------------------------------------------------------ duplicates
